@@ -1,10 +1,12 @@
 mod trace;
-use trace::{DiffuseMat, GlassMat, Material, MetalMat, Scene, Sphere};
+use trace::{DiffuseMat, GlassMat, HittableList, Material, MetalMat, Sphere, BVH};
 
 extern crate image;
 extern crate nalgebra_glm as glm;
 extern crate palette;
 use palette::{rgb::Rgb, Pixel, Srgb};
+
+use rand::prelude::{Rng, ThreadRng};
 
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
@@ -29,31 +31,55 @@ fn save(
         .unwrap();
 }
 
-fn create_scene() -> Scene {
-    let mut s = Scene::new();
+fn create_scene(rng: &mut ThreadRng) -> BVH {
+    let s = create_hittable_list(rng);
+
+    BVH::from_hittable_list(&s, rng)
+}
+
+fn create_hittable_list(rng: &mut ThreadRng) -> HittableList {
+    let mut s = HittableList::new();
 
     s.add(Box::new(Sphere::new(
-        glm::vec3(0., -201., 0.),
+        glm::vec3(0., -200., 0.),
         200.,
         Material::Diffuse(trace::DiffuseMat {
             albedo: Rgb::new(0.8, 0.8, 0.8),
         }),
     )));
+
     s.add(Box::new(Sphere::new(
-        glm::vec3(0., 0., 0.),
-        1.,
+        glm::vec3(0., 1.5, 0.),
+        3.,
         Material::Diffuse(DiffuseMat {
             albedo: Rgb::new(0.9, 0.3, 0.9),
         }),
     )));
+
     s.add(Box::new(Sphere::new(
-        glm::vec3(2., 0., 0.),
-        1.,
+        glm::vec3(-8., 1.5, 0.),
+        3.,
         Material::Metallic(MetalMat {
             albedo: Rgb::new(0.8, 0.8, 0.2),
             roughness: 0.3,
         }),
     )));
+
+    for i in -5..5 {
+        for j in -5..5 {
+            let r = rng.gen_range(0., 1.);
+            let g = rng.gen_range(0., 1.);
+            let b = rng.gen_range(0., 1.);
+
+            s.add(Box::new(Sphere::new(
+                glm::vec3(i as f32, 0.125, j as f32),
+                0.25,
+                Material::Diffuse(DiffuseMat {
+                    albedo: Rgb::new(r, g, b),
+                }),
+            )));
+        }
+    }
 
     s
 }
@@ -85,7 +111,7 @@ fn main() {
 
     eprintln!("Ray-tracing using {} threads", num_threads);
 
-    let default_scene = create_scene();
+    let default_scene = create_scene(&mut rng);
 
     for _ in 0..max_pass {
         for (x, y, _) in imgbuf.enumerate_pixels_mut() {
@@ -95,6 +121,10 @@ fn main() {
         }
         passes += 1;
         pb.inc(1);
+
+        if passes == 2 {
+            save(passes, &mut imgbuf, &drawbuf);
+        };
 
         if passes % 100 == 0 {
             save(passes, &mut imgbuf, &drawbuf);

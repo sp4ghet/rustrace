@@ -1,8 +1,11 @@
+extern crate itertools;
 extern crate nalgebra_glm as glm;
 extern crate palette;
 extern crate rand;
+use itertools::izip;
 use palette::rgb::Rgb;
 use rand::prelude::{Rng, ThreadRng};
+use std::cmp::Ordering;
 use std::f32::consts::*;
 
 fn random_in_unit_disk(rng: &mut ThreadRng) -> glm::Vec3 {
@@ -75,11 +78,11 @@ pub enum Material {
 }
 
 pub struct Hit {
-    p: glm::Vec3,
-    n: glm::Vec3,
-    m: Material,
-    t: f32,
-    front_face: bool,
+    pub p: glm::Vec3,
+    pub n: glm::Vec3,
+    pub m: Material,
+    pub t: f32,
+    pub front_face: bool,
 }
 
 impl Hit {
@@ -98,8 +101,17 @@ impl Hit {
 
 pub trait Hittable {
     fn intersect(&self, r: &Ray, h: &mut Hit) -> bool;
+    fn bounding_box(&self) -> Option<AABB>;
+    fn box_clone(&self) -> Box<dyn Hittable>;
 }
 
+impl Clone for Box<dyn Hittable> {
+    fn clone(&self) -> Self {
+        self.box_clone()
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
 pub struct Sphere {
     center: glm::Vec3,
     radius: f32,
@@ -152,15 +164,75 @@ impl Hittable for Sphere {
 
         return true;
     }
+
+    fn bounding_box(&self) -> Option<AABB> {
+        Some(AABB {
+            min: self.center - glm::vec3(self.radius, self.radius, self.radius),
+            max: self.center + glm::vec3(self.radius, self.radius, self.radius),
+        })
+    }
+
+    fn box_clone(&self) -> Box<dyn Hittable> {
+        Box::new(*self)
+    }
 }
 
-pub struct Scene {
+#[derive(Clone)]
+pub struct AABB {
+    pub min: glm::Vec3,
+    pub max: glm::Vec3,
+}
+
+impl AABB {
+    pub fn new() -> Self {
+        AABB {
+            min: glm::vec3(0., 0., 0.),
+            max: glm::vec3(0., 0., 0.),
+        }
+    }
+
+    pub fn create(min: &glm::Vec3, max: &glm::Vec3) -> Self {
+        AABB {
+            min: *min,
+            max: *max,
+        }
+    }
+
+    pub fn intersect(&self, r: &Ray) -> bool {
+        for (&ro, &rd, &minc, &maxc) in izip!(
+            r.o.as_slice().iter(),
+            r.dir.as_slice().iter(),
+            self.min.as_slice().iter(),
+            self.max.as_slice().iter()
+        ) {
+            let t0 = (((minc - ro) / rd) as f32).min((maxc - ro) / rd);
+            let t1 = (((minc - ro) / rd) as f32).max((maxc - ro) / rd);
+            let t_min = TMIN.max(t0);
+            let t_max = TMAX.min(t1);
+
+            if t_max <= t_min {
+                return false;
+            };
+        }
+
+        true
+    }
+
+    pub fn union(&self, other: &AABB) -> AABB {
+        AABB {
+            min: glm::min2(&self.min, &other.min),
+            max: glm::max2(&self.max, &other.max),
+        }
+    }
+}
+#[derive(Clone)]
+pub struct HittableList {
     content: Vec<Box<dyn Hittable>>,
 }
 
-impl Scene {
+impl HittableList {
     pub fn new() -> Self {
-        Scene {
+        HittableList {
             content: Vec::new(),
         }
     }
@@ -170,7 +242,7 @@ impl Scene {
     }
 }
 
-impl Hittable for Scene {
+impl Hittable for HittableList {
     fn intersect(&self, r: &Ray, h: &mut Hit) -> bool {
         let mut is_hit = false;
         for hittable in &self.content {
@@ -178,6 +250,151 @@ impl Hittable for Scene {
         }
 
         is_hit
+    }
+
+    fn bounding_box(&self) -> Option<AABB> {
+        let mut aabb: Option<AABB> = None;
+        for hittable in &self.content {
+            match hittable.bounding_box() {
+                Some(bb) => match aabb {
+                    Some(bb0) => aabb = Some(bb0.union(&bb)),
+                    None => aabb = Some(bb),
+                },
+                None => (),
+            }
+        }
+
+        aabb
+    }
+
+    fn box_clone(&self) -> Box<dyn Hittable> {
+        let copied = self.clone();
+        Box::new(copied)
+    }
+}
+
+#[derive(Clone)]
+pub struct BVH {
+    left: Option<Box<dyn Hittable>>,
+    right: Option<Box<dyn Hittable>>,
+    aabb: AABB,
+}
+
+impl BVH {
+    pub fn new() -> Self {
+        BVH {
+            left: None,
+            right: None,
+            aabb: AABB::new(),
+        }
+    }
+
+    pub fn from_hittable_list(hittables: &HittableList, rng: &mut ThreadRng) -> Self {
+        Self::from_list_of_hittables(hittables.content.clone(), rng)
+    }
+
+    fn comp_x(a: &Box<dyn Hittable>, b: &Box<dyn Hittable>) -> Ordering {
+        match (a.bounding_box(), b.bounding_box()) {
+            (None, None) => Ordering::Equal,
+            (None, _) => Ordering::Less,
+            (_, None) => Ordering::Greater,
+            (Some(bb0), Some(bb1)) => bb0.min.x.partial_cmp(&bb1.min.x).unwrap(),
+        }
+    }
+    fn comp_y(a: &Box<dyn Hittable>, b: &Box<dyn Hittable>) -> Ordering {
+        match (a.bounding_box(), b.bounding_box()) {
+            (None, None) => Ordering::Equal,
+            (None, _) => Ordering::Less,
+            (_, None) => Ordering::Greater,
+            (Some(bb0), Some(bb1)) => bb0.min.y.partial_cmp(&bb1.min.y).unwrap(),
+        }
+    }
+    fn comp_z(a: &Box<dyn Hittable>, b: &Box<dyn Hittable>) -> Ordering {
+        match (a.bounding_box(), b.bounding_box()) {
+            (None, None) => Ordering::Equal,
+            (None, _) => Ordering::Less,
+            (_, None) => Ordering::Greater,
+            (Some(bb0), Some(bb1)) => bb0.min.z.partial_cmp(&bb1.min.z).unwrap(),
+        }
+    }
+
+    pub fn from_list_of_hittables(list: Vec<Box<dyn Hittable>>, rng: &mut ThreadRng) -> Self {
+        let axis = rng.gen_range(0, 3);
+        let mut objects = list;
+
+        match objects.len() {
+            1 => {
+                let left = objects[0].box_clone();
+
+                return BVH {
+                    left: Some(left),
+                    right: None,
+                    aabb: objects.first().unwrap().bounding_box().unwrap(),
+                };
+            }
+            2 => {
+                let left = objects[0].box_clone();
+                let right = objects[1].box_clone();
+                let aabb = AABB::union(
+                    &left.bounding_box().unwrap(),
+                    &right.bounding_box().unwrap(),
+                );
+                return BVH {
+                    left: Some(left),
+                    right: Some(right),
+                    aabb,
+                };
+            }
+            _ => (),
+        };
+
+        let comp = match axis {
+            0 => BVH::comp_x,
+            1 => BVH::comp_y,
+            _ => BVH::comp_z,
+        };
+
+        objects.sort_by(comp);
+
+        let right_vec = objects.split_off(objects.len() / 2);
+        // split_off mutated objects so it holds the first half
+        let left = BVH::from_list_of_hittables(objects, rng);
+        let right = BVH::from_list_of_hittables(right_vec, rng);
+
+        let aabb = AABB::union(&left.aabb, &right.aabb);
+
+        BVH {
+            left: Some(Box::new(left)),
+            right: Some(Box::new(right)),
+            aabb,
+        }
+    }
+}
+
+impl Hittable for BVH {
+    fn intersect(&self, r: &Ray, h: &mut Hit) -> bool {
+        let mut is_hit = false;
+
+        if self.aabb.intersect(r) {
+            match &self.left {
+                None => (),
+                Some(hittable) => is_hit = hittable.intersect(r, h) || is_hit,
+            };
+            match &self.right {
+                None => (),
+                Some(hittable) => is_hit = hittable.intersect(r, h) || is_hit,
+            }
+        };
+
+        return is_hit;
+    }
+
+    fn bounding_box(&self) -> Option<AABB> {
+        Some(self.aabb.clone())
+    }
+
+    fn box_clone(&self) -> Box<dyn Hittable> {
+        Box::new(self.clone())
     }
 }
 
@@ -198,7 +415,7 @@ impl Camera {
         let aspect = width / height;
         let w = h * aspect;
 
-        let o = glm::vec3(0., 1.3, -5.);
+        let o = glm::vec3(4., 1.3, -7.);
         let lookat = glm::vec3(0., 0., 0.);
         let focal_depth = glm::length(&(o - lookat));
         let up = glm::vec3(0., 1., 0.);
@@ -238,7 +455,7 @@ const TMIN: f32 = 0.001;
 const TMAX: f32 = 100000000.;
 const MAX_ITER: u8 = 5;
 
-fn raycast(r: &Ray, h: &mut Hit, scene: &Scene) -> bool {
+fn raycast(r: &Ray, h: &mut Hit, scene: &dyn Hittable) -> bool {
     scene.intersect(r, h)
 }
 
@@ -287,7 +504,7 @@ fn shade_glass(r: &mut Ray, h: &Hit, mat: GlassMat, rng: &mut ThreadRng) -> glm:
     return glm::vec3(1., 1., 1.);
 }
 
-fn ray_color(r: &mut Ray, scene: &Scene, rng: &mut ThreadRng) -> glm::Vec3 {
+fn ray_color(r: &mut Ray, scene: &dyn Hittable, rng: &mut ThreadRng) -> glm::Vec3 {
     let mut h: Hit = Hit::new();
     let mut c = glm::vec3(1., 1., 1.);
 
@@ -316,7 +533,12 @@ fn ray_color(r: &mut Ray, scene: &Scene, rng: &mut ThreadRng) -> glm::Vec3 {
     return c;
 }
 
-pub fn raytrace(uv: glm::Vec2, cam: &Camera, scene: &Scene, rng: &mut ThreadRng) -> glm::Vec3 {
+pub fn raytrace(
+    uv: glm::Vec2,
+    cam: &Camera,
+    scene: &dyn Hittable,
+    rng: &mut ThreadRng,
+) -> glm::Vec3 {
     let mut r = cam.get_ray(uv, rng);
 
     ray_color(&mut r, scene, rng)
