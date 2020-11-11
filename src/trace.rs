@@ -3,9 +3,7 @@ extern crate palette;
 extern crate rand;
 use palette::rgb::Rgb;
 use rand::prelude::{Rng, ThreadRng};
-
-const PI: f32 = 3.14159265;
-const TAU: f32 = 2. * PI;
+use std::f32::consts::*;
 
 fn random_in_unit_disk(rng: &mut ThreadRng) -> glm::Vec3 {
     let theta: f32 = rng.gen_range(0., TAU);
@@ -42,7 +40,7 @@ fn random_on_unit_hemi(dir: &glm::Vec3, rng: &mut ThreadRng) -> glm::Vec3 {
     get_biased_sample(dir, 0., rng)
 }
 
-struct Ray {
+pub struct Ray {
     o: glm::Vec3,
     dir: glm::Vec3,
 }
@@ -54,29 +52,29 @@ impl Ray {
 }
 
 #[derive(Debug, Copy, Clone)]
-struct DiffuseMat {
-    albedo: Rgb,
+pub struct DiffuseMat {
+    pub albedo: Rgb,
 }
 
 #[derive(Debug, Copy, Clone)]
-struct MetalMat {
-    albedo: Rgb,
-    roughness: f32,
+pub struct MetalMat {
+    pub albedo: Rgb,
+    pub roughness: f32,
 }
 
 #[derive(Debug, Copy, Clone)]
-struct GlassMat {
-    ior: f32,
+pub struct GlassMat {
+    pub ior: f32,
 }
 
 #[derive(Debug, Copy, Clone)]
-enum Material {
+pub enum Material {
     Diffuse(DiffuseMat),
     Metallic(MetalMat),
     Glass(GlassMat),
 }
 
-struct Hit {
+pub struct Hit {
     p: glm::Vec3,
     n: glm::Vec3,
     m: Material,
@@ -98,7 +96,11 @@ impl Hit {
     }
 }
 
-struct Sphere {
+pub trait Hittable {
+    fn intersect(&self, r: &Ray, h: &mut Hit) -> bool;
+}
+
+pub struct Sphere {
     center: glm::Vec3,
     radius: f32,
     material: Material,
@@ -112,8 +114,10 @@ impl Sphere {
             material,
         }
     }
+}
 
-    pub fn intersect(&self, r: &Ray, h: &mut Hit) -> bool {
+impl Hittable for Sphere {
+    fn intersect(&self, r: &Ray, h: &mut Hit) -> bool {
         let oc: glm::Vec3 = r.o - self.center;
         let b = glm::dot(&oc, &r.dir);
         let c = oc.magnitude_squared() - self.radius.powi(2);
@@ -147,6 +151,33 @@ impl Sphere {
         };
 
         return true;
+    }
+}
+
+pub struct Scene {
+    content: Vec<Box<dyn Hittable>>,
+}
+
+impl Scene {
+    pub fn new() -> Self {
+        Scene {
+            content: Vec::new(),
+        }
+    }
+
+    pub fn add(&mut self, h: Box<dyn Hittable>) {
+        self.content.push(h);
+    }
+}
+
+impl Hittable for Scene {
+    fn intersect(&self, r: &Ray, h: &mut Hit) -> bool {
+        let mut is_hit = false;
+        for hittable in &self.content {
+            is_hit = hittable.intersect(r, h) || is_hit;
+        }
+
+        is_hit
     }
 }
 
@@ -207,42 +238,12 @@ const TMIN: f32 = 0.001;
 const TMAX: f32 = 100000000.;
 const MAX_ITER: u8 = 5;
 
-fn raycast(r: &Ray, h: &mut Hit) -> bool {
-    let mut is_hit = false;
-
-    let pl: Sphere = Sphere {
-        center: glm::vec3(0., -201., 0.),
-        radius: 200.,
-        material: Material::Diffuse(DiffuseMat {
-            albedo: Rgb::new(0.8, 0.8, 0.8),
-        }),
-    };
-
-    let s = Sphere {
-        center: glm::vec3(0., 0., 0.),
-        radius: 1.,
-        material: Material::Diffuse(DiffuseMat {
-            albedo: Rgb::new(0.9, 0.3, 0.9),
-        }),
-    };
-    let s2 = Sphere::new(
-        glm::vec3(2., 0., 0.),
-        1.,
-        Material::Metallic(MetalMat {
-            albedo: Rgb::new(0.8, 0.8, 0.2),
-            roughness: 0.3,
-        }),
-    );
-
-    is_hit = pl.intersect(r, h) || is_hit;
-    is_hit = s.intersect(r, h) || is_hit;
-    is_hit = s2.intersect(r, h) || is_hit;
-
-    return is_hit;
+fn raycast(r: &Ray, h: &mut Hit, scene: &Scene) -> bool {
+    scene.intersect(r, h)
 }
 
 fn shade_diffuse(r: &mut Ray, h: &Hit, mat: DiffuseMat, rng: &mut ThreadRng) -> glm::Vec3 {
-    r.dir = cosine_weighted_sample(&r.dir, rng);
+    r.dir = cosine_weighted_sample(&h.n, rng);
     r.o = h.p;
 
     glm::vec3(mat.albedo.red, mat.albedo.green, mat.albedo.blue)
@@ -286,13 +287,13 @@ fn shade_glass(r: &mut Ray, h: &Hit, mat: GlassMat, rng: &mut ThreadRng) -> glm:
     return glm::vec3(1., 1., 1.);
 }
 
-fn ray_color(r: &mut Ray, rng: &mut ThreadRng) -> glm::Vec3 {
+fn ray_color(r: &mut Ray, scene: &Scene, rng: &mut ThreadRng) -> glm::Vec3 {
     let mut h: Hit = Hit::new();
     let mut c = glm::vec3(1., 1., 1.);
 
     for _ in 0..MAX_ITER {
         h.t = TMAX;
-        let is_hit = raycast(&r, &mut h);
+        let is_hit = raycast(&r, &mut h, scene);
         if is_hit {
             match h.m {
                 Material::Diffuse(mat) => {
@@ -315,8 +316,8 @@ fn ray_color(r: &mut Ray, rng: &mut ThreadRng) -> glm::Vec3 {
     return c;
 }
 
-pub fn raytrace(uv: glm::Vec2, cam: &Camera, rng: &mut ThreadRng) -> glm::Vec3 {
+pub fn raytrace(uv: glm::Vec2, cam: &Camera, scene: &Scene, rng: &mut ThreadRng) -> glm::Vec3 {
     let mut r = cam.get_ray(uv, rng);
 
-    ray_color(&mut r, rng)
+    ray_color(&mut r, scene, rng)
 }
