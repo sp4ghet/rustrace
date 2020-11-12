@@ -398,6 +398,8 @@ impl Hittable for BVH {
     }
 }
 
+unsafe impl Sync for BVH {}
+
 pub struct Camera {
     o: glm::Vec3,
     lower_left: glm::Vec3,
@@ -415,7 +417,7 @@ impl Camera {
         let aspect = width / height;
         let w = h * aspect;
 
-        let o = glm::vec3(4., 1.3, -7.);
+        let o = glm::vec3(4., 2.5, -7.);
         let lookat = glm::vec3(0., 0., 0.);
         let focal_depth = glm::length(&(o - lookat));
         let up = glm::vec3(0., 1., 0.);
@@ -533,12 +535,7 @@ fn ray_color(r: &mut Ray, scene: &dyn Hittable, rng: &mut ThreadRng) -> glm::Vec
     return c;
 }
 
-pub fn raytrace(
-    uv: glm::Vec2,
-    cam: &Camera,
-    scene: &dyn Hittable,
-    rng: &mut ThreadRng,
-) -> glm::Vec3 {
+pub fn raytrace(uv: glm::Vec2, cam: &Camera, scene: &BVH, rng: &mut ThreadRng) -> glm::Vec3 {
     let mut r = cam.get_ray(uv, rng);
 
     ray_color(&mut r, scene, rng)
